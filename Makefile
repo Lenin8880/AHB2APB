@@ -1,90 +1,62 @@
-.PHONY: setup test test-verbose clean
+.PHONY: help compile run regression clean
 
-setup:
-	python -m pip install --upgrade pip
-	python -m pip install -r requirements.txt
+SIM ?= questa
+TEST ?= test_basic_write_read
+TB_TOP ?= top_tb
+TB_DIR := tb
+RTL_DIR := rtl
+FILELIST := $(TB_DIR)/tb.f
 
-test:
-	pytest -q tb/test_runner.py
+# Set UVM_HOME for simulators that do not preload UVM (VCS/Xcelium)
+UVM_HOME ?=
 
-test-verbose:
-	pytest -vv tb/test_runner.py -s
-
-clean:
-	rm -rf sim_build .pytest_cache tb/__pycache__ tb/*.vcd tb/results.xml
-# Makefile for AHB2APB Bridge Verification
-# Cocotb-based testbench with proper time precision
-
-# Simulator configuration
-SIM ?= iverilog
-WAVES ?= 1
-
-# Cocotb timing configuration - CRITICAL for precision
-# Setting timescale to picoseconds (ps) for accurate nanosecond (ns) simulation
-COCOTB_RESOLUTION = ps
-COCOTB_TIMEUNIT = 1ps
-COCOTB_TIMEPRECISION = 1ps
-
-# Iverilog simulator flags for SystemVerilog support
-EXTRA_ARGS ?= -g2009 -gspecify
-
-# Top module
-TOPLEVEL = Bridge_Top
-TOPLEVEL_LANG = verilog
-
-# Verilog source files
-VERILOG_SOURCES += $(PWD)/ahb_apb_top.sv
-
-# Testbench settings
-MODULE = test_ahb2apb
-TESTDIR = tb
-
-# Python path for test discovery
-export PYTHONPATH := $(PYTHONPATH):$(PWD)/tb
-
-# Default target
-.PHONY: all
-all: test
-
-# Run tests target
-.PHONY: test
-test: 
-	COCOTB_RESOLUTION=$(COCOTB_RESOLUTION) \
-	COCOTB_TIMEUNIT=$(COCOTB_TIMEUNIT) \
-	COCOTB_TIMEPRECISION=$(COCOTB_TIMEPRECISION) \
-	SIM=$(SIM) \
-	WAVES=$(WAVES) \
-	python -m pytest $(TESTDIR)/test_runner.py -v --tb=short
-
-# Run with verbose logging
-.PHONY: test-verbose
-test-verbose:
-	COCOTB_RESOLUTION=$(COCOTB_RESOLUTION) \
-	COCOTB_TIMEUNIT=$(COCOTB_TIMEUNIT) \
-	COCOTB_TIMEPRECISION=$(COCOTB_TIMEPRECISION) \
-	COCOTB_LOG_LEVEL=DEBUG \
-	SIM=$(SIM) \
-	WAVES=$(WAVES) \
-	python -m pytest $(TESTDIR)/test_runner.py -v -s
-
-# Clean build artifacts
-.PHONY: clean
-clean:
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	find . -type f -name '*.pyc' -delete
-	find . -type f -name '*.fst' -delete
-	find . -type f -name '*.vvp' -delete
-	rm -rf $(TESTDIR)/__pycache__
-	rm -rf build/
-
-.PHONY: help
 help:
-	@echo "AHB2APB Bridge Verification - Available Targets:"
-	@echo "  make test          - Run all tests with standard logging"
-	@echo "  make test-verbose  - Run tests with debug logging"
-	@echo "  make clean         - Clean build artifacts"
-	@echo "  make help          - Show this help message"
+	@echo "AHB2APB UVM Verification"
+	@echo "  make compile SIM=questa|vcs|xcelium"
+	@echo "  make run TEST=<uvm_test_name> SIM=questa|vcs|xcelium"
+	@echo "  make regression SIM=questa|vcs|xcelium"
+	@echo "  make clean"
 	@echo ""
-	@echo "Configuration Environment Variables:"
-	@echo "  SIM=iverilog       - Simulator selection (default: iverilog)"
-	@echo "  WAVES=1            - Enable waveform generation (default: 1)",
+	@echo "Regression tests:"
+	@echo "  test_basic_write_read"
+	@echo "  test_invalid_address"
+	@echo "  test_back_to_back"
+	@echo "  test_hreadyin_gating"
+	@echo "  test_all_psel_windows"
+	@echo "  test_random_regression"
+
+compile:
+ifeq ($(SIM),questa)
+	vlib work
+	vlog -sv -f $(FILELIST)
+else ifeq ($(SIM),vcs)
+	@if [ -z "$(UVM_HOME)" ]; then echo "Set UVM_HOME for VCS flow"; exit 1; fi
+	vcs -sverilog -ntb_opts uvm -full64 -timescale=1ns/1ps \
+		+incdir+$(TB_DIR)/uvm +incdir+$(UVM_HOME)/src \
+		$(UVM_HOME)/src/uvm_pkg.sv -f $(FILELIST) -l vcs_compile.log -o simv
+else ifeq ($(SIM),xcelium)
+	@if [ -z "$(UVM_HOME)" ]; then echo "Set UVM_HOME for Xcelium flow"; exit 1; fi
+	xrun -64bit -sv -timescale 1ns/1ps -uvm \
+		+incdir+$(TB_DIR)/uvm +incdir+$(UVM_HOME)/src \
+		-f $(FILELIST) -elaborate -l xrun_compile.log
+else
+	@echo "Unsupported SIM=$(SIM). Use questa, vcs, or xcelium."; exit 1
+endif
+
+run: compile
+ifeq ($(SIM),questa)
+	vsim -c $(TB_TOP) +UVM_TESTNAME=$(TEST) -do "run -all; quit -f" -l questa_run.log
+else ifeq ($(SIM),vcs)
+	./simv +UVM_TESTNAME=$(TEST) -l vcs_run.log
+else ifeq ($(SIM),xcelium)
+	xrun -64bit -R +UVM_TESTNAME=$(TEST) -l xrun_run.log
+endif
+
+regression: compile
+	@for t in test_basic_write_read test_invalid_address test_back_to_back test_hreadyin_gating test_all_psel_windows test_random_regression; do \
+		echo "Running $$t"; \
+		$(MAKE) run SIM=$(SIM) TEST=$$t || exit 1; \
+	done
+
+clean:
+	rm -rf work transcript vsim.wlf *.log simv simv.daidir xrun.d xcelium.d INCA_libs ucli.key
