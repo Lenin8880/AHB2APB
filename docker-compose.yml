@@ -1,0 +1,7 @@
+services:
+  ahb2apb-verify:
+    build: .
+    container_name: ahb2apb-verify
+    volumes:
+      - ./:/app
+    command: make test-verbose
